@@ -1,0 +1,95 @@
+# preprocess_main.py
+import os
+
+# Import is required for PlatformIO build scripts
+# Import("env")
+
+
+def process_main_c(rel_src_folder):
+    """
+    This script processes 'Src/main.c' to:
+    1. Extract the initialization code from main() into a new init_main() function.
+    2. Remove the original main() function entirely.
+    """
+    main_c_path = os.curdir + "/" + rel_src_folder + "/main.c"
+    print("\n\n--- Running main.c pre-processing script ---")
+
+    if not os.path.exists(main_c_path):
+        print(f"[WARNING] '{main_c_path}' not found. Skipping pre-processing.")
+        return
+
+    try:
+        with open(main_c_path, "r") as f:
+            lines = f.readlines()
+    except Exception as e:
+        print(f"[ERROR] Failed to read '{main_c_path}': {e}")
+        return
+
+    mode = 0
+    skip_next_start_main = False
+    skip_next_end_main = False
+    skip_to_end = False
+    copied_lines = []
+
+    with open(main_c_path, "w") as f:
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+
+            if skip_next_end_main:
+                skip_next_end_main = False
+                mode = 2
+                continue
+
+            if skip_next_start_main:
+                skip_next_start_main = False
+                continue
+
+            if skip_to_end:  # ending marker
+                if stripped.startswith("/* USER CODE END 3 */"):
+                    skip_next_end_main = True
+                    skip_to_end = False
+                    continue
+                else:
+                    continue
+
+            if mode == 0:
+                if stripped.startswith("int main(void)"):
+                    mode = 1
+                    if not stripped.startswith("int main(void){"):
+                        skip_next_start_main = True
+                    continue
+
+            elif mode == 1:  # found main function
+
+                if stripped.startswith("/* USER CODE BEGIN WHILE"):
+                    skip_to_end = True
+                    continue
+
+                elif stripped.startswith(
+                    "/*"
+                ):  # comment line skipping inside main function
+                    continue
+                else:
+                    copied_lines.append(line)
+                    continue
+
+            elif mode == 2:
+                f.write("void init_main(void) {\n")
+                for copied_idx, copied_line in enumerate(copied_lines):
+                    f.write(copied_line)
+                f.write("}\n\n")
+                mode = 3  # Move to mode 3 to write the rest of the file
+
+            f.write(line)
+    if mode == 0:
+        print("--- Project is already patched. Skipping ---\n")
+        return
+    print("--- Finished pre-processing main.c ---\n")
+
+
+# Register the function to run before the "buildprog" target
+# env.AddPreAction("$BUILD_DIR/src/main.o", process_main_c)
+
+if __name__ == "__main__":
+    process_main_c("Core/Src")
+    exit(0)

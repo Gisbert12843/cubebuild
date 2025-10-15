@@ -1,0 +1,692 @@
+# CMakeLists_Patcher.py
+from datetime import datetime
+import os
+import collections
+import sys
+import argparse
+from dataclasses import dataclass, field
+from enum import Enum, auto
+
+### Configuration
+config_file = "build.conf"
+cmake_file = "CMakeLists.txt"
+main_location = "Src/main.cpp"
+###
+
+
+class TaskType(Enum):
+    """Enumeration for the different types of patching operations."""
+
+    REPLACE = auto()
+    INSERT_BELOW = auto()
+    INSERT_ABOVE = auto()
+    INSERT_BELOW_LAST = auto()
+    INSERT_ABOVE_PADDING = auto()
+
+
+@dataclass
+class Task:
+    """Represents a single modification task for the CMakeLists.txt file."""
+
+    task_type: TaskType
+    target_line_start: str
+    new_line_content: list[str]  # Can be one or more lines
+    padding: int = field(default=0)  # Number of empty lines for padding tasks
+    completed: bool = field(default=False, init=False)
+
+
+def parse_config_topics(file_content: str) -> dict[str, list[str]]:
+    """
+    Parses a simple indented text configuration into a dictionary.
+
+    Args:
+        file_content: A string containing the entire configuration text.
+
+    Returns:
+        A dictionary where keys are topics and values are lists of children.
+
+    Raises:
+        ValueError: If a duplicate topic is found or indentation is incorrect.
+    """
+    parsed_data = collections.OrderedDict()
+    current_topic = None
+
+    for line_num, line in enumerate(file_content.splitlines(), 1):
+        stripped_line = line.strip()
+
+        if not stripped_line or stripped_line.startswith("#"):
+            continue
+
+        if not line[0].isspace():
+            current_topic = stripped_line
+            if current_topic in parsed_data:
+                raise ValueError(
+                    f"Configuration Error: Duplicate topic '{current_topic}' found on line {line_num}."
+                )
+            parsed_data[current_topic] = []
+        else:
+            if not current_topic:
+                raise ValueError(
+                    f"Configuration Error: Found an indented child '{stripped_line}' on line {line_num} before any topic was defined."
+                )
+            parsed_data[current_topic].append(stripped_line)
+
+    return dict(parsed_data)
+
+
+class CMakePatcher:
+    """
+    Orchestrates the patching of a CMakeLists.txt file based on a config.
+    """
+
+    def __init__(self, cmake_filepath, config_filepath):
+        self.cmake_filepath = cmake_filepath
+        self.config_filepath = config_filepath
+        self.config = {}
+        self.tasks = []
+
+        self._topic_handlers = {
+            "Project": self._handle_project,
+            "BuildType": self._handle_build_type,
+            "IncludeFolders": self._handle_include_folders,
+            "SourceFolders": self._handle_source_folders,
+            "CompileOptions": self._handle_compile_options,
+            "Libraries": self._handle_libraries,
+            "Languages": self._handle_languages,
+            "GlobalDefines": self._handle_globaldefines,
+            "InsertBelowLast": self._handle_insert_below_last,
+            "InsertAbovePadding": self._handle_insert_above_padding,
+        }
+        self.known_topics = set(self._topic_handlers.keys())
+
+    def _store_original_backup(self):
+        """
+        Stores the original CMakeLists.txt content as a commented backup.
+        """
+        if self._has_backup():
+            print("Backup already exists, skipping backup creation.")
+            return
+
+        try:
+            with open(self.cmake_filepath, "r") as file:
+                original_content = file.read()
+
+            backup_section = f"\n# === ORIGINAL BACKUP (stored on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ===\n"
+            backup_section += (
+                "# The following is the original content before patching:\n"
+            )
+
+            for line in original_content.splitlines():
+                backup_section += f"# {line}\n"
+
+            backup_section += "# === END ORIGINAL BACKUP ===\n"
+
+            with open(self.cmake_filepath, "a") as file:
+                file.write(backup_section)
+
+            print("Original CMakeLists.txt content backed up in commented section.")
+
+        except FileNotFoundError:
+            print(f"Error: {self.cmake_filepath} not found!")
+
+    def _has_backup(self):
+        """
+        Checks if the CMakeLists.txt file already contains a backup section.
+        """
+        try:
+            with open(self.cmake_filepath, "r") as file:
+                return "# === ORIGINAL BACKUP" in file.read()
+        except FileNotFoundError:
+            return False
+
+    def restore_from_backup(self):
+        """
+        Restores the original CMakeLists.txt content from the backup section.
+        """
+        if not self._has_backup():
+            print("No backup found in CMakeLists.txt. Cannot restore.")
+            return False
+
+        try:
+            with open(self.cmake_filepath, "r") as file:
+                content = file.read()
+
+            backup_start = content.find("# === ORIGINAL BACKUP")
+            if backup_start == -1:
+                return False
+
+            backup_section = content[backup_start:]
+            backup_end = backup_section.find("# === END ORIGINAL BACKUP ===")
+            if backup_end == -1:
+                return False
+
+            backup_lines = (
+                backup_section[backup_section.find("\n") : backup_end]
+                .strip()
+                .split("\n")
+            )
+            restored_content = ""
+
+            for line in backup_lines:
+                if line.startswith(
+                    "# The following is the original content before patching:"
+                ):
+                    continue
+                if line.startswith("# ") and not line.startswith("# ==="):
+                    restored_content += line[2:] + "\n"
+                elif line == "#":
+                    restored_content += "\n"
+
+            with open(self.cmake_filepath, "w") as file:
+                file.write(restored_content)
+
+            print(f"Successfully restored {self.cmake_filepath} from backup.")
+            return True
+
+        except (FileNotFoundError, IOError) as e:
+            print(f"Error during restoration: {e}")
+            return False
+
+    def _validate_config(self):
+        """
+        Validates that all topics in the parsed config are known/supported.
+        """
+        for topic in self.config.keys():
+            if topic not in self.known_topics:
+                raise ValueError(
+                    f"Configuration Error: Unknown topic '{topic}' found in config file."
+                )
+        print("Configuration validated successfully.")
+
+    def run(self):
+        """
+        Executes the full patching process.
+        """
+        with open(self.config_filepath, "r") as f:
+            self.config = parse_config_topics(f.read())
+        print("--- Parsed Configuration ---")
+        print(self.config)
+        print("-" * 28)
+
+        self._validate_config()
+
+        print("\n--- Creating Backup ---")
+        self._store_original_backup()
+        print("-" * 23)
+
+        print("\n--- Building Task List ---")
+        for topic, children in self.config.items():
+            handler = self._topic_handlers[topic]
+            handler(children)
+        print(f"{len(self.tasks)} tasks created.")
+        print("-" * 24)
+
+        self._apply_patches_from_tasks()
+        print("-" * 24)
+
+    def _apply_patches_from_tasks(self):
+        """
+        Reads the CMakeLists.txt file, applies all tasks, and writes back.
+        """
+        try:
+            with open(self.cmake_filepath, "r") as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            print(f"Error: {self.cmake_filepath} not found for patching!")
+            return
+
+        # First pass: collect all INSERT_BELOW_LAST tasks and find their target positions
+        below_last_targets = {}
+        for task in self.tasks:
+            if task.task_type == TaskType.INSERT_BELOW_LAST and not task.completed:
+                # Find the last occurrence of this target in the original lines
+                last_match_line_num = -1
+                for i, line in enumerate(lines):
+                    if not line.strip().startswith("#") and line.strip().startswith(task.target_line_start):
+                        last_match_line_num = i
+                
+                if last_match_line_num != -1:
+                    if last_match_line_num not in below_last_targets:
+                        below_last_targets[last_match_line_num] = []
+                    below_last_targets[last_match_line_num].append(task)
+
+        modified_lines = []
+        line_idx = 0
+        
+        while line_idx < len(lines):
+            line = lines[line_idx]
+
+            # Always add comments as-is
+            if line.strip().startswith("#"):
+                modified_lines.append(line)
+                line_idx += 1
+                continue
+
+            # Find all tasks that match this line (excluding INSERT_BELOW_LAST which we handle separately)
+            matching_tasks = [
+                task
+                for task in self.tasks
+                if not task.completed
+                and task.task_type != TaskType.INSERT_BELOW_LAST
+                and line.strip().startswith(task.target_line_start)
+            ]
+
+            if matching_tasks:
+                # Group tasks by type for this line
+                above_tasks = [
+                    t for t in matching_tasks if t.task_type == TaskType.INSERT_ABOVE
+                ]
+                above_padding_tasks = [
+                    t
+                    for t in matching_tasks
+                    if t.task_type == TaskType.INSERT_ABOVE_PADDING
+                ]
+                below_tasks = [
+                    t for t in matching_tasks if t.task_type == TaskType.INSERT_BELOW
+                ]
+                replace_tasks = [
+                    t for t in matching_tasks if t.task_type == TaskType.REPLACE
+                ]
+
+                # Handle REPLACE tasks first (they consume the original line)
+                if replace_tasks:
+                    # Apply all INSERT_ABOVE tasks first
+                    for task in above_tasks:
+                        modified_lines.extend([l + "\n" for l in task.new_line_content])
+                        task.completed = True
+
+                    # Apply all INSERT_ABOVE_PADDING tasks
+                    for task in above_padding_tasks:
+                        modified_lines.extend([l + "\n" for l in task.new_line_content])
+                        # Add padding lines
+                        for _ in range(task.padding):
+                            modified_lines.append("\n")
+                        task.completed = True
+
+                    # Replace the original line
+                    task = replace_tasks[0]  # Only take the first replace task
+                    modified_lines.extend([l + "\n" for l in task.new_line_content])
+                    task.completed = True
+                    
+                    # Mark other replace tasks as completed to avoid conflicts
+                    for other_task in replace_tasks[1:]:
+                        other_task.completed = True
+
+                    # Apply all regular INSERT_BELOW tasks
+                    for task in below_tasks:
+                        modified_lines.extend([l + "\n" for l in task.new_line_content])
+                        task.completed = True
+
+                # Handle non-REPLACE tasks
+                else:
+                    # Apply all INSERT_ABOVE tasks
+                    for task in above_tasks:
+                        modified_lines.extend([l + "\n" for l in task.new_line_content])
+                        task.completed = True
+
+                    # Apply all INSERT_ABOVE_PADDING tasks
+                    for task in above_padding_tasks:
+                        modified_lines.extend([l + "\n" for l in task.new_line_content])
+                        # Add padding lines
+                        for _ in range(task.padding):
+                            modified_lines.append("\n")
+                        task.completed = True
+
+                    # Add the original line back
+                    modified_lines.append(line)
+
+                    # Apply all regular INSERT_BELOW tasks
+                    for task in below_tasks:
+                        modified_lines.extend([l + "\n" for l in task.new_line_content])
+                        task.completed = True
+
+            else:
+                # No matching tasks, just add the line
+                modified_lines.append(line)
+
+            # Check if this line_idx has any INSERT_BELOW_LAST tasks
+            if line_idx in below_last_targets:
+                for task in below_last_targets[line_idx]:
+                    insert_lines = [l + "\n" for l in task.new_line_content]
+                    modified_lines.extend(insert_lines)
+                    task.completed = True
+
+            line_idx += 1
+
+        uncompleted_tasks = [task for task in self.tasks if not task.completed]
+        if uncompleted_tasks:
+            print(
+                "\nWarning: The following tasks could not be completed (target line not found):"
+            )
+            for task in uncompleted_tasks:
+                print(f"  - Target: '{task.target_line_start}' ({task.task_type.name})")
+
+        try:
+            with open(self.cmake_filepath, "w") as f:
+                f.writelines(modified_lines)
+            print("\nFile patching complete.")
+        except IOError as e:
+            print(f"Error writing to {self.cmake_filepath}: {e}")
+
+    # --- Task Creation Methods ---
+
+    def _handle_project(self, children: list[str]):
+        if len(children) != 1:
+            raise ValueError("Topic 'Project' must have exactly one child.")
+        self.tasks.append(
+            Task(
+                TaskType.REPLACE,
+                f"set(CMAKE_PROJECT_NAME",
+                [f"set(CMAKE_PROJECT_NAME {children[0]})"],
+            )
+        )
+        print(f"  TASK ADDED: Set project name to '{children[0]}'.")
+
+    def _handle_build_type(self, children: list[str]):
+        if len(children) != 1:
+            raise ValueError("Topic 'BuildType' must have exactly one child.")
+        self.tasks.append(
+            Task(
+                TaskType.REPLACE,
+                "set(CMAKE_BUILD_TYPE",
+                [f'set(CMAKE_BUILD_TYPE "{children[0]}")'],
+            )
+        )
+        print(f"  TASK ADDED: Set default build type to '{children[0]}'.")
+
+    def _handle_include_folders(self, children: list[str]):
+        # Replace the entire target_include_directories call
+        content = ["target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE"]
+        content.extend([f"    {child}" for child in children])
+
+        self.tasks.append(
+            Task(
+                TaskType.REPLACE,
+                "target_include_directories(",
+                content,
+            )
+        )
+        print(f"  TASK ADDED: Add include folders: {', '.join(children)}")
+
+    def _handle_source_folders(self, children: list[str]):
+        # Create the GLOB section
+        self.tasks.append(
+            Task(
+                TaskType.INSERT_ABOVE,
+                "target_sources(",
+                [
+                    "file(GLOB SRC_FILES",
+                ]
+                + [f"    {c}/*.cpp" for c in children]
+                + [f"    {c}/*.c" for c in children]
+                + [")"],
+            )
+        )
+        # Fix the target_sources call to be complete
+        self.tasks.append(
+            Task(
+                TaskType.REPLACE,  # Changed from INSERT_BELOW to REPLACE
+                "target_sources(",
+                [
+                    "target_sources(${CMAKE_PROJECT_NAME} PRIVATE",
+                    "    ${SRC_FILES}",
+                ],
+            )
+        )
+        print(f"  TASK ADDED: Add source folders.")
+
+    def _handle_compile_options(self, children: list[str]):
+        self.tasks.append(
+            Task(
+                TaskType.INSERT_BELOW_LAST,
+                "add_subdirectory(",
+                ["target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE"]
+                + [f"    {c}" for c in children]
+                + [")"],
+            )
+        )
+        print(f"  TASK ADDED: Add compile options.")
+
+    def _handle_libraries(self, children: list[str]):
+        library_names = []
+        library_paths = []
+
+        for child in children:
+            parts = child.split(" ", 1)
+            if len(parts) == 2:
+                library_name, library_path = parts
+                library_names.append(library_name)
+                library_paths.append(library_path)
+            else:
+                raise ValueError(
+                    f"Library definition '{child}' must be in format 'library_name path/to/library'"
+                )
+
+        # Create complete target_link_libraries call
+        content = ["target_link_libraries(${CMAKE_PROJECT_NAME}"]
+        content.extend([f"    {name}" for name in library_names])
+
+        self.tasks.append(
+            Task(
+                TaskType.REPLACE,
+                "target_link_libraries(",
+                content,
+            )
+        )
+        #e.g. add_subdirectory(../software/SDK/Cpp ${CMAKE_BINARY_DIR}/software_sdk_cpp)
+        # Create tasks for adding subdirectories
+        for library_path in library_paths:
+            self.tasks.append(
+                Task(
+                    TaskType.INSERT_BELOW,
+                    "add_subdirectory(",
+                    [f"add_subdirectory({library_path} ${{CMAKE_BINARY_DIR}}/{os.path.basename(library_path)})"],
+                )
+            )
+
+        print(f"  TASK ADDED: Link libraries: {', '.join(library_names)}")
+        print(f"  TASK ADDED: Add subdirectories: {', '.join(library_paths)}")
+
+    def _handle_languages(self, children: list[str]):
+        if not children:
+            raise ValueError("Topic 'Languages' must have at least one child.")
+
+        self.tasks.append(
+            Task(
+                TaskType.REPLACE,
+                "enable_language(",
+                [f'enable_language({" ".join(children)})'],
+            )
+        )
+        if children.__contains__("CXX"):
+            self.tasks.append(
+                Task(
+                    TaskType.INSERT_BELOW,
+                    "set(CMAKE_C_EXTENSIONS",
+                    [
+                        "set(CMAKE_CXX_STANDARD 17)",
+                        "set(CMAKE_CXX_STANDARD_REQUIRED ON)",
+                        "set(CMAKE_CXX_EXTENSIONS ON)",
+                    ],
+                )
+            )
+
+        print(f"  TASK ADDED: Enable languages: {', '.join(children)}")
+
+    def _handle_globaldefines(self, children: list[str]):
+        if not children:
+            raise ValueError("Topic 'GlobalDefines' must have at least one child.")
+
+        defines = []
+
+        for child in children:
+            parts = child.split(" ", 1)  # Split on first space only
+            if len(parts) == 2:
+                define_name, define_value = parts
+                defines.append(f"{define_name}={define_value}")
+            else:
+                defines.append(f"{child}")
+
+        # Create a single target_compile_definitions call with all defines
+        content = [f"target_compile_definitions(${{CMAKE_PROJECT_NAME}} PRIVATE"] + [
+            f"    {define}" for define in defines
+        ]
+        self.tasks.append(
+            Task(
+                TaskType.REPLACE,
+                "target_compile_definitions(${CMAKE_PROJECT_NAME}",
+                content,
+            )
+        )
+        print(f"  TASK ADDED: Add global defines: {', '.join(defines)}")
+        ############################################################################
+        ############################################################################
+
+    def _handle_insert_below(self, children: list[str]):
+        # The first child is the target line, the rest is content
+        if len(children) < 2:
+            raise ValueError(
+                "InsertBelowExample needs a target line and at least one line of content."
+            )
+        target = children[0]
+        content = children[1:]
+        self.tasks.append(Task(TaskType.INSERT_BELOW, target, content))
+        print(f"  TASK ADDED: Insert {len(content)} lines below '{target}'.")
+
+        ############################################################################
+        ############################################################################
+
+    def _handle_insert_below_last(self, children: list[str]):
+        # The first child is the target line, the rest is content
+        if len(children) < 2:
+            raise ValueError(
+                "InsertBelowLast needs a target line and at least one line of content."
+            )
+        target = children[0]
+        content = children[1:]
+        self.tasks.append(Task(TaskType.INSERT_BELOW_LAST, target, content))
+        print(
+            f"  TASK ADDED: Insert {len(content)} lines below last occurrence of '{target}'."
+        )
+
+    def _handle_insert_above_padding(self, children: list[str]):
+        # The first child is the target line, the second is padding count, the rest is content
+        if len(children) < 3:
+            raise ValueError(
+                "InsertAbovePadding needs a target line, padding count, and at least one line of content."
+            )
+        target = children[0]
+        try:
+            padding = int(children[1])
+        except ValueError:
+            raise ValueError(f"Padding count must be an integer, got '{children[1]}'")
+        content = children[2:]
+
+        task = Task(TaskType.INSERT_ABOVE_PADDING, target, content)
+        task.padding = padding
+        self.tasks.append(task)
+        print(
+            f"  TASK ADDED: Insert {len(content)} lines above '{target}' with {padding} lines padding."
+        )
+        ############################################################################
+        ############################################################################
+
+
+def check_cmake_patched(cmake_file):
+    try:
+        with open(cmake_file, "r") as file:
+            first_line = file.readline().strip()
+            return "patched" in first_line.lower()
+    except FileNotFoundError:
+        return False
+
+
+def add_cmake_patched_marker(cmake_file):
+    try:
+        with open(cmake_file, "r") as file:
+            lines = file.readlines()
+
+        if not check_cmake_patched(cmake_file):
+            lines.insert(
+                0,
+                "# patched at " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n",
+            )
+            with open(cmake_file, "w") as file:
+                file.writelines(lines)
+    except FileNotFoundError:
+        print(f"Error: {cmake_file} not found!")
+
+
+def main():
+    """Main entry point that returns status code."""
+    parser = argparse.ArgumentParser(
+        description="CMakeLists.txt patcher with backup and restore functionality"
+    )
+    parser.add_argument(
+        "--restore", action="store_true", help="Restore CMakeLists.txt from backup"
+    )
+    parser.add_argument(
+        "--check-backup", action="store_true", help="Check if backup exists"
+    )
+    parser.add_argument(
+        "--cmake-file",
+        default=cmake_file,
+        help=f"Path to CMakeLists.txt file (default: {cmake_file})",
+    )
+    parser.add_argument(
+        "--config-file",
+        default=config_file,
+        help=f"Path to config file (default: {config_file})",
+    )
+
+    args = parser.parse_args()
+
+    cmake_file_path = args.cmake_file
+    config_file_path = args.config_file
+
+    if args.restore:
+        if not os.path.exists(cmake_file_path):
+            print(f"Error: CMakeLists.txt file '{cmake_file_path}' not found!")
+            return 1
+
+        patcher = CMakePatcher(cmake_file_path, config_file_path)
+        return 0 if patcher.restore_from_backup() else 1
+
+    if args.check_backup:
+        if not os.path.exists(cmake_file_path):
+            print(f"Error: CMakeLists.txt file '{cmake_file_path}' not found!")
+            return 1
+
+        patcher = CMakePatcher(cmake_file_path, config_file_path)
+        print(
+            "Backup exists in CMakeLists.txt"
+            if patcher._has_backup()
+            else "No backup found in CMakeLists.txt"
+        )
+        return 0
+
+    if not os.path.exists(cmake_file_path) or not os.path.exists(config_file_path):
+        print(f"Error: Required files '{cmake_file_path}' or '{config_file_path}' are missing!")
+        return 1
+
+    try:
+        if check_cmake_patched(cmake_file_path):
+            print(f"{cmake_file_path} is already patched. Exiting.")
+            return 0
+
+        patcher = CMakePatcher(cmake_file_path, config_file_path)
+        patcher.run()
+        add_cmake_patched_marker(cmake_file_path)
+        print("\nPatching process completed successfully.")
+        return 0
+
+    except ValueError as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
