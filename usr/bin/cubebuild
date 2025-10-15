@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+# build.py
+import os
+import json
+import platform
+import sys
+import time
+import shutil
+import subprocess
+
+# Get the directory where this script is located
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# ../lib
+lib_dir = os.path.abspath(os.path.join(script_dir, "..", "lib"))
+
+python_executable = "python3"
+project_configure_script_rel_location = os.path.join(lib_dir, "__mainc_fixer")
+cmakelist_patcher_script = os.path.join(lib_dir, "__cmakelist_patcher")
+Config_File = "build.conf"
+CMakeFile = "CMakeLists.txt"
+Build_Toolchain = "gcc-arm-none-eabi"
+convert_toolchain = "arm-none-eabi-objcopy"
+ioc_file = ""
+
+
+# uses {Build_Toolchain}-objcopy
+def convert_elf_to_bin(elf_file, bin_file):
+    if not os.path.exists(elf_file):
+        print(f"ELF file {elf_file} does not exist.")
+        return False
+
+    objcopy_cmd = f"{convert_toolchain} -O binary {elf_file} {bin_file}"
+    result = os.system(objcopy_cmd)
+    if result != 0:
+        print("Failed to convert ELF to BIN.")
+        return False
+
+    print(f"Converted {elf_file} to {bin_file}.")
+    return True
+
+
+def delete_folder(folder_path):
+    if os.path.exists(folder_path) and os.path.isdir(folder_path):
+        shutil.rmtree(folder_path)
+        print(f"Deleted folder: {folder_path}")
+    else:
+        print(f"Folder not found: {folder_path}")
+
+
+# obtains name from the CMakeFile after it has been patched
+def get_target_executable_name() -> str:
+    if not os.path.exists(CMakeFile):
+        print(f"{CMakeFile} does not exist.")
+        return ""
+
+    with open(CMakeFile, "r") as file:
+        for line in file:
+            if line.strip().startswith("set(CMAKE_PROJECT_NAME "):
+                # Extract the word until the closing parenthesis
+                target_name = (
+                    line.strip().split("set(CMAKE_PROJECT_NAME ")[1].split(")")[0]
+                )
+                return target_name
+    print(f"TARGET_EXECUTABLE not found in {CMakeFile}.")
+    return ""
+
+
+def build_project():
+    # Use CMake build system
+    configure_cmd = f"cmake -S . -B build --toolchain cmake/{Build_Toolchain}.cmake"
+    build_cmd = "cmake --build build"
+
+    print("Configuring CMake project...")
+    result = os.system(configure_cmd)
+    if result != 0:
+        print("CMake configuration failed!")
+        return False
+
+    print("Building project...")
+    result = os.system(build_cmd)
+    if result != 0:
+        print("Build failed!")
+        return False
+
+    print("Build completed successfully!")
+    return True
+
+
+def flash_project():
+    # Flash the automatically generated binary
+    if not os.path.exists("build"):
+        print("Build directory does not exist. Please build the project first.")
+        return
+    if not os.path.exists("build/{}.elf".format(get_target_executable_name())):
+        print("ELF file does not exist. Please build the project first.")
+        return
+    if not convert_elf_to_bin(
+        "build/{}.elf".format(get_target_executable_name()),
+        "build/{}.bin".format(get_target_executable_name()),
+    ):
+        print("Failed to convert ELF to BIN. Flashing aborted.")
+        return
+    print("Flashing binary to device...")
+    print("st-flash write build/{}.bin 0x8000000".format(get_target_executable_name()))
+    os.system(
+        "st-flash write build/{}.bin 0x8000000".format(get_target_executable_name())
+    )
+
+
+def clean_project():
+    # Clean CMake build directory
+    delete_folder("build")
+    print("Cleaned build directory")
+
+
+def full_clean_project():
+    # Clean everything that can be regenerated
+    delete_folder("build")
+    delete_folder("Core")
+    delete_folder("Drivers")
+    delete_folder("deps")
+    delete_folder("cmake")
+    delete_folder("Middlewares")
+    if os.path.exists("CMakeLists.txt"):
+        os.remove("CMakeLists.txt")
+    if os.path.exists("CMakePresets.json"):
+        os.remove("CMakePresets.json")
+    if os.path.exists("CMakeUserPresets.json"):
+        os.remove("CMakeUserPresets.json")
+    if os.path.exists("CMakeCache.txt"):
+        os.remove("CMakeCache.txt")
+
+    for file in os.listdir("."):
+        if (
+            file.endswith(".h")
+            or file.endswith(".s")
+            or file.endswith(".c")
+            or file.endswith(".ld")
+            or file.endswith(".mxproject")
+        ):
+            print(f"Removing file: {file}")
+            os.remove(file)
+
+
+def find_stm32cubemx() -> str | None:
+    # First, check if it's in PATH
+    if shutil.which("STM32CubeMX") is not None:
+        print("Found STM32CubeMX in PATH")
+        return "STM32CubeMX"
+
+    # Define fallback locations to search
+    home_dir = os.path.expanduser("~")
+    fallback_locations = [
+        os.path.join(home_dir, "STM32CubeMX", "STM32CubeMX"),
+        "/opt/STM32CubeMX/STM32CubeMX",
+        "/usr/local/STM32CubeMX/STM32CubeMX",
+    ]
+
+    # Search in fallback locations
+    for location in fallback_locations:
+        if os.path.isfile(location) and os.access(location, os.X_OK):
+            print(f"Found STM32CubeMX at: {location}")
+            return location
+
+    print("STM32CubeMX not found in PATH or common locations")
+    return None
+
+
+def check_if_generated():
+    # if Core folder exists and a .ld file exists
+    if os.path.exists("Core") and any(file.endswith(".ld") for file in os.listdir(".")):
+        print("Found Project to be generated by STM32CubeMX.")
+        return True
+    else:
+        print("Project is currently not generated by STM32CubeMX.")
+        return False
+
+
+def generate_from_ioc():
+    # STM32CubeMX -q ./commands.txt
+
+    # config load /home/kai/Documents/PlatformIO/Projects/CMakeTest/CMakeTest.ioc
+    # project generate
+    # exit
+
+    # check and obtain path to STM32CubeMX
+    stm32cubemx_path = find_stm32cubemx()
+    if stm32cubemx_path is None:
+        print("STM32CubeMX is required to generate the project from .ioc file. ")
+        print(
+            "Please provide it to the User's PATH or install it in the recommended location e.g. /home/USERNAME/STM32CubeMX/."
+        )
+        sys.exit(1)
+
+    global ioc_file
+    # check for --ioc "filepath" argument
+    if "--ioc" in sys.argv or "-ioc" in sys.argv:
+        ioc_index = (
+            sys.argv.index("--ioc") + 1
+            if "--ioc" in sys.argv
+            else sys.argv.index("-ioc") + 1
+        )
+        if ioc_index < len(sys.argv):
+            ioc_file = os.path.abspath(sys.argv[ioc_index])
+            if not os.path.exists(ioc_file) or not ioc_file.endswith(".ioc"):
+                print(f"The specified .ioc file does not exist: {ioc_file}")
+                sys.exit(1)
+            else:
+                print(f"Using specified .ioc file: {ioc_file}")
+        else:
+            print("No .ioc file specified after --ioc flag. Please provide a filepath.")
+            sys.exit(1)
+    else:
+        ioc_files_count = [f for f in os.listdir(".") if f.endswith(".ioc")]
+        if len(ioc_files_count) == 0:
+            print(
+                "No .ioc file found in the current directory. Please specify one using --ioc <filepath>."
+            )
+            sys.exit(1)
+        elif len(ioc_files_count) > 1:
+            print(
+                "Multiple .ioc files found in the current directory. Please specify one using --ioc <filepath>."
+            )
+            sys.exit(1)
+        else:
+            ioc_file = os.path.abspath(ioc_files_count[0])
+            print(f'Using automatically found .ioc file: "{ioc_file}"')
+
+    commands = f"config load {ioc_file}\nproject generate\nexit"
+
+    import tempfile
+
+    temp_commands_file = None
+
+    try:
+        print("Generating project from .ioc file using STM32CubeMX...")
+
+        # Create temporary file with commands
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            temp_commands_file = f.name
+            f.write(commands)
+
+        ioc_directory = os.path.dirname(ioc_file)
+
+        cmd = f'"{stm32cubemx_path}" -q "{temp_commands_file}"'
+
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            text=True,
+            stdout=subprocess.PIPE,  # capture output
+            stderr=subprocess.PIPE,  # capture errors
+            cwd=ioc_directory,
+            env=os.environ.copy(),  # inherit environment variables
+        )
+
+        output = result.stdout + result.stderr
+
+        # Check if output ends with CubeMX success pattern
+        if "OK\nexit\nBye bye" in output or output.strip().endswith("Bye bye"):
+            print("STM32CubeMX code generation successful")
+            return True
+        else:
+            print("STM32CubeMX code generation failed")
+            print("Output:", output)
+            return False
+
+    except FileNotFoundError:
+        print("STM32CubeMX not found in PATH")
+        return False
+    finally:
+        # Clean up temporary file
+        if temp_commands_file and os.path.exists(temp_commands_file):
+            os.remove(temp_commands_file)
+
+
+def fix_mainc():
+    os.system(f"{python_executable} {project_configure_script_rel_location}")
+
+
+def patch_cmakefile():
+    result = os.system(
+        f"{python_executable} {cmakelist_patcher_script} --cmake-file ./CMakeLists.txt"
+    )
+    print(f"Return code: {result >> 8}")  # os.system returns exit code << 8
+
+
+def un_patch_cmakefile():
+    result = os.system(
+        f"{python_executable} {cmakelist_patcher_script} --cmake-file ./CMakeLists.txt --restore"
+    )
+    print(f"Return code: {result >> 8}")
+
+
+def patch_vscode_intellisense():
+    # find or create and patch .vscode/c_cpp_properties.json by adding "compileCommands": ["${workspaceFolder}/build/compile_commands.json"]
+    path = ".vscode/c_cpp_properties.json"
+    new_path = "${workspaceFolder}/build/compile_commands.json"
+
+    if not os.path.exists(path):
+        os.makedirs(".vscode", exist_ok=True)
+        default_config = {
+            "configurations": [{"name": "Linux", "compileCommands": [new_path]}],
+            "version": 4,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(default_config, f, indent=4)
+        print("Created .vscode/c_cpp_properties.json with compileCommands")
+        return
+
+    print("Patching .vscode/c_cpp_properties.json for Intellisense...")
+
+    with open(path, "r+", encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            print("Invalid or empty JSON file, creating new configuration...")
+            data = {"configurations": [], "version": 4}
+
+        # Ensure configurations key exists
+        if "configurations" not in data:
+            data["configurations"] = []
+
+        if len(data["configurations"]) == 0:
+            data["configurations"].append(
+                {"name": "Linux", "compileCommands": [new_path]}
+            )
+            modified = True
+        else:
+            modified = False
+            for cfg in data["configurations"]:
+                if "compileCommands" not in cfg:
+                    cfg["compileCommands"] = [new_path]
+                    modified = True
+                else:
+                    if not isinstance(cfg["compileCommands"], list):
+                        cfg["compileCommands"] = [str(cfg["compileCommands"])]
+                        modified = True
+
+                    if new_path not in cfg["compileCommands"]:
+                        cfg["compileCommands"].append(new_path)
+                        modified = True
+
+        if modified:
+            f.seek(0)
+            json.dump(data, f, indent=4)
+            f.truncate()
+            print("Patched existing c_cpp_properties.json")
+        else:
+            print("c_cpp_properties.json already patched")
+
+
+# fmt: off
+
+def print_usage():
+    print("Usage: python3 build.py [command]")
+    print("Commands:")
+    print("  all                          - Patch, build and flash project (default)")
+    print("  build                        - attempt to build project only")
+    print("  flash                        - Flash project to device")
+    print("  clean                        - Clean build folder")
+    print("  full_clean                   - Clean build folder and remove all generated files")
+    print("  patch                        - Patch CMakeLists.txt and fix main.c")
+    print("  unpatch                      - restore CMakeLists.txt")
+    print("  enable_vscode_intellisense   - generate .vscode/c_cpp_properties.json for Intellisense")
+    print("Note: Patching validates itself, so multiple patching is safe.")
+
+    print("\nOptional arguments:")
+    print(
+        "  --ioc <filepath>  - Specify the .ioc file to use (if not provided, the script will look for a single .ioc file in the current directory)"
+    )
+
+# fmt: on
+
+
+if __name__ == "__main__":
+    start_time = time.time()
+
+    # detect linux os
+    detected_os = platform.system()
+    if not detected_os == "Linux":
+        print("This script is intended to run on Linux systems.")
+        print("Detected OS:", detected_os)
+        sys.exit(1)
+
+    # Get command line argument
+    command = sys.argv[1] if len(sys.argv) > 1 else "help"
+
+    if command == "all":
+        if not check_if_generated():
+            if not generate_from_ioc():
+                print("Failed to generate project from .ioc file.")
+                sys.exit(1)
+        patch_cmakefile()
+        fix_mainc()
+        if build_project():
+            flash_project()
+            sys.exit(0)
+        else:
+            print("Build failed, not flashing.")
+            delete_folder("build")
+            sys.exit(1)
+
+    elif command == "build":
+        if build_project():
+            print("Build succeeded.")
+            sys.exit(0)
+        else:
+            print("Build failed.")
+            delete_folder("build")
+            sys.exit(1)
+
+    elif command == "flash":
+        flash_project()
+
+    elif command == "clean":
+        clean_project()
+
+    elif command == "full_clean":
+        full_clean_project()
+
+    elif command == "patch":
+        patch_cmakefile()
+        fix_mainc()
+    elif command == "unpatch":
+        un_patch_cmakefile()
+
+    elif command == "enable_vscode_intellisense":
+        patch_vscode_intellisense()
+
+    elif command == "help" or command == "--help" or command == "-h":
+        print_usage()
+        sys.exit(0)
+
+    else:
+        print(f"Unknown command: {command}")
+        print_usage()
+        sys.exit(1)
+
+    end_time = time.time()
+    print(f"Operation completed in {end_time - start_time:.2f} seconds.")

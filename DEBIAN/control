@@ -1,0 +1,7 @@
+Package: cubebuild
+Version: 0.0.2
+Architecture: all
+Maintainer: Kai Oestreich <oestreich@incoretex.de>
+Description: A small Wrapper around scripts easing the building and flashing of STCube based Project with Custom C++ Code and Libraries.
+             Just call CubeBuild for the functionality overview.
+Depends: python3, cmake, gcc-arm-none-eabi, binutils-arm-none-eabi, stlink-tools
