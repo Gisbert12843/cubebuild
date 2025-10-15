@@ -360,10 +360,11 @@ def print_usage():
     print("  flash                        - Flash project to device")
     print("  clean                        - Clean build folder")
     print("  full_clean                   - Clean build folder and remove all generated files")
+    print("  generate                     - Generate project files from .ioc | this is a potentially destructive operation")
     print("  patch                        - Patch CMakeLists.txt and fix main.c")
-    print("  unpatch                      - restore CMakeLists.txt")
+    print("  unpatch                      - restore CMakeLists.txt | this does not restore main.c, for that re-generate the project")
     print("  enable_vscode_intellisense   - generate .vscode/c_cpp_properties.json for Intellisense")
-    print("Note: Patching validates itself, so multiple patching is safe.")
+    print("Note: Patching validates itself, so multiple patchings is safe.")
 
     print("\nOptional arguments:")
     print(
@@ -418,6 +419,11 @@ if __name__ == "__main__":
 
     elif command == "full_clean":
         full_clean_project()
+        
+    elif command == "generate":
+        if not generate_from_ioc():
+            print("Failed to generate project from .ioc file.")
+            sys.exit(1)
 
     elif command == "patch":
         patch_cmakefile()
