@@ -204,25 +204,17 @@ class CMakePatcher:
         """
         with open(self.config_filepath, "r") as f:
             self.config = parse_config_topics(f.read())
-        print("--- Parsed Configuration ---")
         print(self.config)
-        print("-" * 28)
 
         self._validate_config()
 
-        print("\n--- Creating Backup ---")
         self._store_original_backup()
-        print("-" * 23)
 
-        print("\n--- Building Task List ---")
         for topic, children in self.config.items():
             handler = self._topic_handlers[topic]
             handler(children)
-        print(f"{len(self.tasks)} tasks created.")
-        print("-" * 24)
 
         self._apply_patches_from_tasks()
-        print("-" * 24)
 
     def _apply_patches_from_tasks(self):
         """
@@ -242,9 +234,11 @@ class CMakePatcher:
                 # Find the last occurrence of this target in the original lines
                 last_match_line_num = -1
                 for i, line in enumerate(lines):
-                    if not line.strip().startswith("#") and line.strip().startswith(task.target_line_start):
+                    if not line.strip().startswith("#") and line.strip().startswith(
+                        task.target_line_start
+                    ):
                         last_match_line_num = i
-                
+
                 if last_match_line_num != -1:
                     if last_match_line_num not in below_last_targets:
                         below_last_targets[last_match_line_num] = []
@@ -252,7 +246,7 @@ class CMakePatcher:
 
         modified_lines = []
         line_idx = 0
-        
+
         while line_idx < len(lines):
             line = lines[line_idx]
 
@@ -307,7 +301,7 @@ class CMakePatcher:
                     task = replace_tasks[0]  # Only take the first replace task
                     modified_lines.extend([l + "\n" for l in task.new_line_content])
                     task.completed = True
-                    
+
                     # Mark other replace tasks as completed to avoid conflicts
                     for other_task in replace_tasks[1:]:
                         other_task.completed = True
@@ -370,7 +364,10 @@ class CMakePatcher:
 
     # --- Task Creation Methods ---
 
-    def _handle_project(self, children: list[str]):
+    def _handle_project(self, children: list[str]) -> bool:
+        if not children:
+            print("Ignoring empty 'Project' topic.")
+            return False
         if len(children) != 1:
             raise ValueError("Topic 'Project' must have exactly one child.")
         self.tasks.append(
@@ -381,8 +378,12 @@ class CMakePatcher:
             )
         )
         print(f"  TASK ADDED: Set project name to '{children[0]}'.")
+        return True
 
-    def _handle_build_type(self, children: list[str]):
+    def _handle_build_type(self, children: list[str]) -> bool:
+        if not children:
+            print("Ignoring empty 'BuildType' topic.")
+            return False
         if len(children) != 1:
             raise ValueError("Topic 'BuildType' must have exactly one child.")
         self.tasks.append(
@@ -393,8 +394,13 @@ class CMakePatcher:
             )
         )
         print(f"  TASK ADDED: Set default build type to '{children[0]}'.")
+        return True
 
-    def _handle_include_folders(self, children: list[str]):
+    def _handle_include_folders(self, children: list[str]) -> bool:
+
+        if not children:
+            print("Ignoring empty 'IncludeFolders' topic.")
+            return False
         # Replace the entire target_include_directories call
         content = ["target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE"]
         content.extend([f"    {child}" for child in children])
@@ -407,8 +413,12 @@ class CMakePatcher:
             )
         )
         print(f"  TASK ADDED: Add include folders: {', '.join(children)}")
+        return True
 
-    def _handle_source_folders(self, children: list[str]):
+    def _handle_source_folders(self, children: list[str]) -> bool:
+        if not children:
+            print("Ignoring empty 'SourceFolders' topic.")
+            return False
         # Create the GLOB section
         self.tasks.append(
             Task(
@@ -434,8 +444,12 @@ class CMakePatcher:
             )
         )
         print(f"  TASK ADDED: Add source folders.")
+        return True
 
-    def _handle_compile_options(self, children: list[str]):
+    def _handle_compile_options(self, children: list[str]) -> bool:
+        if not children:
+            print("Ignoring empty 'CompileOptions' topic.")
+            return False
         self.tasks.append(
             Task(
                 TaskType.INSERT_BELOW_LAST,
@@ -446,8 +460,13 @@ class CMakePatcher:
             )
         )
         print(f"  TASK ADDED: Add compile options.")
+        return True
 
-    def _handle_libraries(self, children: list[str]):
+    def _handle_libraries(self, children: list[str]) -> bool:
+
+        if not children:
+            print("Ignoring empty 'Libraries' topic.")
+            return False
         library_names = []
         library_paths = []
 
@@ -473,23 +492,27 @@ class CMakePatcher:
                 content,
             )
         )
-        #e.g. add_subdirectory(../software/SDK/Cpp ${CMAKE_BINARY_DIR}/software_sdk_cpp)
+        # e.g. add_subdirectory(../software/SDK/Cpp ${CMAKE_BINARY_DIR}/software_sdk_cpp)
         # Create tasks for adding subdirectories
         for library_path in library_paths:
             self.tasks.append(
                 Task(
                     TaskType.INSERT_BELOW,
                     "add_subdirectory(",
-                    [f"add_subdirectory({library_path} ${{CMAKE_BINARY_DIR}}/{os.path.basename(library_path)})"],
+                    [
+                        f"add_subdirectory({library_path} ${{CMAKE_BINARY_DIR}}/{os.path.basename(library_path)})"
+                    ],
                 )
             )
 
         print(f"  TASK ADDED: Link libraries: {', '.join(library_names)}")
         print(f"  TASK ADDED: Add subdirectories: {', '.join(library_paths)}")
+        return True
 
-    def _handle_languages(self, children: list[str]):
+    def _handle_languages(self, children: list[str]) -> bool:
         if not children:
-            raise ValueError("Topic 'Languages' must have at least one child.")
+            print("Ignoring empty 'Languages' topic.")
+            return False
 
         self.tasks.append(
             Task(
@@ -512,10 +535,12 @@ class CMakePatcher:
             )
 
         print(f"  TASK ADDED: Enable languages: {', '.join(children)}")
+        return True
 
-    def _handle_globaldefines(self, children: list[str]):
+    def _handle_globaldefines(self, children: list[str]) -> bool:
         if not children:
-            raise ValueError("Topic 'GlobalDefines' must have at least one child.")
+            print("Ignoring empty 'GlobalDefines' topic.")
+            return False
 
         defines = []
 
@@ -539,6 +564,7 @@ class CMakePatcher:
             )
         )
         print(f"  TASK ADDED: Add global defines: {', '.join(defines)}")
+        return True
         ############################################################################
         ############################################################################
 
@@ -570,6 +596,7 @@ class CMakePatcher:
         )
 
     def _handle_insert_above_padding(self, children: list[str]):
+
         # The first child is the target line, the second is padding count, the rest is content
         if len(children) < 3:
             raise ValueError(
@@ -618,74 +645,85 @@ def add_cmake_patched_marker(cmake_file):
 
 
 def main():
-    """Main entry point that returns status code."""
-    parser = argparse.ArgumentParser(
-        description="CMakeLists.txt patcher with backup and restore functionality"
-    )
-    parser.add_argument(
-        "--restore", action="store_true", help="Restore CMakeLists.txt from backup"
-    )
-    parser.add_argument(
-        "--check-backup", action="store_true", help="Check if backup exists"
-    )
-    parser.add_argument(
-        "--cmake-file",
-        default=cmake_file,
-        help=f"Path to CMakeLists.txt file (default: {cmake_file})",
-    )
-    parser.add_argument(
-        "--config-file",
-        default=config_file,
-        help=f"Path to config file (default: {config_file})",
-    )
-
-    args = parser.parse_args()
-
-    cmake_file_path = args.cmake_file
-    config_file_path = args.config_file
-
-    if args.restore:
-        if not os.path.exists(cmake_file_path):
-            print(f"Error: CMakeLists.txt file '{cmake_file_path}' not found!")
-            return 1
-
-        patcher = CMakePatcher(cmake_file_path, config_file_path)
-        return 0 if patcher.restore_from_backup() else 1
-
-    if args.check_backup:
-        if not os.path.exists(cmake_file_path):
-            print(f"Error: CMakeLists.txt file '{cmake_file_path}' not found!")
-            return 1
-
-        patcher = CMakePatcher(cmake_file_path, config_file_path)
-        print(
-            "Backup exists in CMakeLists.txt"
-            if patcher._has_backup()
-            else "No backup found in CMakeLists.txt"
-        )
-        return 0
-
-    if not os.path.exists(cmake_file_path) or not os.path.exists(config_file_path):
-        print(f"Error: Required files '{cmake_file_path}' or '{config_file_path}' are missing!")
-        return 1
-
     try:
-        if check_cmake_patched(cmake_file_path):
-            print(f"{cmake_file_path} is already patched. Exiting.")
+        """Main entry point that returns status code."""
+        parser = argparse.ArgumentParser(
+            description="CMakeLists.txt patcher with backup and restore functionality"
+        )
+        parser.add_argument(
+            "--restore", action="store_true", help="Restore CMakeLists.txt from backup"
+        )
+        parser.add_argument(
+            "--check-backup", action="store_true", help="Check if backup exists"
+        )
+        parser.add_argument(
+            "--cmake-file",
+            default=cmake_file,
+            help=f"Path to CMakeLists.txt file (default: {cmake_file})",
+        )
+        parser.add_argument(
+            "--config-file",
+            default=config_file,
+            help=f"Path to config file (default: {config_file})",
+        )
+
+        args = parser.parse_args()
+
+        cmake_file_path = args.cmake_file
+        config_file_path = args.config_file
+
+        if args.restore:
+            if not os.path.exists(cmake_file_path):
+                print(f"Error: CMakeLists.txt file '{cmake_file_path}' not found!")
+                return 1
+
+            patcher = CMakePatcher(cmake_file_path, config_file_path)
+            return 0 if patcher.restore_from_backup() else 1
+
+        if args.check_backup:
+            if not os.path.exists(cmake_file_path):
+                print(f"Error: CMakeLists.txt file '{cmake_file_path}' not found!")
+                return 1
+
+            patcher = CMakePatcher(cmake_file_path, config_file_path)
+            print(
+                "Backup exists in CMakeLists.txt"
+                if patcher._has_backup()
+                else "No backup found in CMakeLists.txt"
+            )
             return 0
 
-        patcher = CMakePatcher(cmake_file_path, config_file_path)
-        patcher.run()
-        add_cmake_patched_marker(cmake_file_path)
-        print("\nPatching process completed successfully.")
-        return 0
+        if not os.path.exists(cmake_file_path) or not os.path.exists(config_file_path):
+            print(
+                f"Error: Required files '{cmake_file_path}' or '{config_file_path}' are missing!"
+            )
+            return 1
 
-    except ValueError as e:
-        print(f"\nError: {e}", file=sys.stderr)
-        return 1
+        try:
+            if check_cmake_patched(cmake_file_path):
+                print(f"{cmake_file_path} is already patched. Exiting.")
+                return 0
+
+            patcher = CMakePatcher(cmake_file_path, config_file_path)
+            patcher.run()
+            add_cmake_patched_marker(cmake_file_path)
+            print("\nPatching process completed successfully.")
+            return 0
+
+        except ValueError as e:
+            print(f"\nError: {e}", file=sys.stderr)
+            patcher = CMakePatcher(cmake_file_path, config_file_path)
+            if patcher._has_backup():
+                print("Restoring from backup...", file=sys.stderr)
+                patcher.restore_from_backup()
+            else:
+                print("No backup available to restore.", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"\nAn unexpected error occurred: {e}", file=sys.stderr)
+            return 1
     except Exception as e:
-        print(f"\nAn unexpected error occurred: {e}", file=sys.stderr)
-        return 1
+        print(f"An unexpected error occurred in main: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

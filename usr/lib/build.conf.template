@@ -1,0 +1,29 @@
+Project
+    # Testname
+
+BuildType
+    # Debug
+    # Release
+
+IncludeFolders
+    # Inc
+
+SourceFolders
+    # Src
+
+CompileOptions
+    # -Wall
+    # -Wextra
+    # -Werror
+
+Libraries
+    # libName ../lib/path
+
+Languages
+    C
+    CXX
+    ASM
+
+GlobalDefines
+    # TESTMAKRO 1
+    # TESTMAKRO=2

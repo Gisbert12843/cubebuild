@@ -1,5 +1,5 @@
 Package: cubebuild
-Version: 0.0.3
+Version: 0.0.4
 Architecture: all
 Maintainer: Kai Oestreich <oestreich@incoretex.de>
 Description: A small Wrapper around scripts easing the building and flashing of STCube based Project with Custom C++ Code and Libraries.
