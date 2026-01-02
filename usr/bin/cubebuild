@@ -243,6 +243,22 @@ def generate_from_ioc():
             ioc_file = os.path.abspath(ioc_files_count[0])
             print(f'Using automatically found .ioc file: "{ioc_file}"')
 
+    # found ioc file after this point
+    # check if the CMake is declared as the target toolchain in the ioc file
+    # "ProjectManager.TargetToolchain=CMake"
+    with open(ioc_file, "r") as f:
+        ioc_contents = f.read()
+        if "ProjectManager.TargetToolchain=CMake" not in ioc_contents:
+            print(
+                error(
+                    "The .ioc file does not have CMake declared as the target toolchain."
+                )
+            )
+            print(
+                "Please enable CMake support in STM32CubeMX/Project Manager/Project/Toolchain and enable copy all used files under STM32CubeMX/Project Manager/Code Generator"
+            )
+            sys.exit(1)
+
     commands = f"config load {ioc_file}\nproject generate\nexit"
 
     import tempfile
@@ -393,6 +409,7 @@ def print_usage():
     print("  flash                        - Flash project to device")
     print("  clean                        - Clean build folder")
     print("  full_clean                   - Clean build folder and remove all generated files")
+    print("  debug                        - Start a debugging session")
     print("  generate                     - Generate project files from .ioc | this is a potentially destructive operation")
     print("  patch                        - Patch CMakeLists.txt and fix main.c")
     print("  unpatch                      - restore CMakeLists.txt | this does not restore main.c, for that re-generate the project")
@@ -457,6 +474,17 @@ if __name__ == "__main__":
 
     elif command == "full_clean":
         full_clean_project()
+    elif command == "debug":
+        # start gdb-multiarch with the built elf file
+        elf_file = f"build/{get_target_executable_name()}.elf"
+        if not os.path.exists(elf_file):
+            print(
+                f"ELF file {elf_file} does not exist. Please build the project first."
+            )
+            sys.exit(1)
+        gdb_cmd = f"gdb-multiarch {elf_file}"
+        print(f"Starting GDB with command: {gdb_cmd}")
+        os.system(gdb_cmd)
 
     elif command == "generate":
         if not generate_from_ioc():
